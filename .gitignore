@@ -1,18 +1,30 @@
-# Frontend dependencies
+# Node dependencies & builds
+node_modules/
 frontend/node_modules/
+.next/
 frontend/.next/
+out/
+frontend/out/
+build/
+dist/
 
-# Python virtual environment
-backend/venv/
-
-# Python cache
+# Python cache & virtual environments
 __pycache__/
-*.pyc
-
-# Environment files
+backend/__pycache__/
+*.py[cod]
+*$py.class
+*.so
 .env
 .env.local
+.env.*.local
+venv/
+.venv/
+env/
+ENV/
 
-# OS files
+# System and IDE files
 .DS_Store
 Thumbs.db
+.vscode/
+.idea/
+*.log

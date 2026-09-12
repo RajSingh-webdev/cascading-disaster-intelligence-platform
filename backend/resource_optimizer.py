@@ -1,21 +1,31 @@
 from math import radians, sin, cos, sqrt, atan2
 
-from cascade_engine import calculate_cascade
+from cascade_engine import calculate_cascade, villages
 from priority_engine import calculate_priorities
 
 
+VILLAGE_NAMES = {
+    "V1": "Pipra Dewas",
+    "V2": "Sultanganj Diara",
+    "V3": "Manjhaul Lowlands",
+    "V4": "Mohanpur West",
+    "V5": "Rampur Ghat Diara",
+}
+
 RESOURCE_LOCATIONS = {
-    "A1": (28.6200, 77.2000),
-    "A2": (28.6500, 77.2400),
-    "A3": (28.5900, 77.2300),
-    "R1": (28.6100, 77.2100),
-    "R2": (28.6600, 77.2200),
+    "A1": (25.1420, 85.9410),  # Barauni Staging Base
+    "A2": (25.1470, 85.9610),  # Sultanganj CHC Base
+    "A3": (25.1355, 85.9495),  # Sadar Hospital Base
+    "R1": (25.1440, 85.9430),  # SDRF Flood Rescue Team 1
+    "R2": (25.1510, 85.9580),  # NDRF Flood Rescue Team 2
 }
 
 VILLAGE_LOCATIONS = {
-    "V1": (28.6300, 77.2100),
-    "V2": (28.6700, 77.2500),
-    "V3": (28.6000, 77.2700),
+    "V1": (25.1480, 85.9428),  # Pipra Dewas
+    "V2": (25.1595, 85.9572),  # Sultanganj Diara
+    "V3": (25.1370, 85.9515),  # Manjhaul Lowlands
+    "V4": (25.1495, 85.9395),  # Mohanpur West
+    "V5": (25.1480, 85.9580),  # Rampur Ghat Diara (Dense Town Settlement West of A2)
 }
 
 AMBULANCES = ["A1", "A2", "A3"]
@@ -94,6 +104,7 @@ def calculate_assignment_cost(
     return {
         "resource": resource_id,
         "village_id": village_id,
+        "village_name": VILLAGE_NAMES.get(village_id, village_id),
         "distance_km": round(distance_km, 2),
         "travel_time_min": round(travel_time_min, 2),
         "assignment_score": round(assignment_score, 2),
@@ -134,17 +145,19 @@ def allocate_resources(
 
         best = candidates[0]
         village = remaining_villages.pop(best["village_id"])
+        village_name = VILLAGE_NAMES.get(best["village_id"], best["village_id"])
 
         resource_type = (
             "AMBULANCE"
             if resource_id.startswith("A")
-            else "RESCUE_TEAM"
+            else "RESCUE_BOAT"
         )
 
         allocations.append({
             "resource": best["resource"],
             "resource_type": resource_type,
             "village_id": best["village_id"],
+            "village_name": village_name,
             "priority_score": village["priority_score"],
             "priority_level": village["priority_level"],
             "population": village["population"],
@@ -152,10 +165,9 @@ def allocate_resources(
             "estimated_travel_time_min": best["travel_time_min"],
             "assignment_score": best["assignment_score"],
             "reason": (
-                f"{village['priority_level']} priority, "
-                f"{village['population']} people exposed, "
-                f"estimated travel time "
-                f"{best['travel_time_min']} min"
+                f"{village['priority_level']} priority at {village_name}, "
+                f"{village['population']:,} people exposed, "
+                f"estimated travel time: {best['travel_time_min']} min"
             ),
         })
 
@@ -186,11 +198,17 @@ def optimize_resources(priorities: list[dict]) -> dict:
     }
 
     all_villages = {
-        village["village_id"] for village in priorities
+        village["village_id"]: village for village in priorities
     }
 
-    ambulance_unserved = sorted(all_villages - ambulance_covered)
-    rescue_unserved = sorted(all_villages - rescue_covered)
+    ambulance_unserved = [
+        f"{vid} ({VILLAGE_NAMES.get(vid, vid)})"
+        for vid in sorted(set(all_villages.keys()) - ambulance_covered)
+    ]
+    rescue_unserved = [
+        f"{vid} ({VILLAGE_NAMES.get(vid, vid)})"
+        for vid in sorted(set(all_villages.keys()) - rescue_covered)
+    ]
 
     allocations = ambulance_allocations + rescue_allocations
 
@@ -198,13 +216,13 @@ def optimize_resources(priorities: list[dict]) -> dict:
         "status": "OPTIMIZED",
         "allocations": allocations,
         "ambulance_coverage": {
-            "served_villages": sorted(ambulance_covered),
+            "served_villages": [f"{vid} ({VILLAGE_NAMES.get(vid, vid)})" for vid in sorted(ambulance_covered)],
             "unserved_villages": ambulance_unserved,
             "total_resources": len(AMBULANCES),
             "resources_used": len(ambulance_allocations),
         },
         "rescue_team_coverage": {
-            "served_villages": sorted(rescue_covered),
+            "served_villages": [f"{vid} ({VILLAGE_NAMES.get(vid, vid)})" for vid in sorted(rescue_covered)],
             "unserved_villages": rescue_unserved,
             "total_resources": len(RESCUE_TEAMS),
             "resources_used": len(rescue_allocations),
@@ -217,38 +235,11 @@ if __name__ == "__main__":
     priorities = calculate_priorities(cascade_result)
     result = optimize_resources(priorities)
 
-    print("\n========== RESOURCE OPTIMIZATION ==========")
+    print("\n========== REAL BIHAR RESOURCE OPTIMIZATION ==========")
     for allocation in result["allocations"]:
         print(
-            f"{allocation['resource']} "
-            f"({allocation['resource_type']}) -> "
-            f"{allocation['village_id']} | "
-            f"Priority: {allocation['priority_score']:.2f} | "
+            f"{allocation['resource']} ({allocation['resource_type']}) -> "
+            f"{allocation['village_name']} ({allocation['village_id']}) | "
             f"Distance: {allocation['distance_km']} km | "
             f"ETA: {allocation['estimated_travel_time_min']} min"
         )
-
-    print("\n========== COVERAGE ==========")
-    print("\nAMBULANCE COVERAGE")
-    print("Served Villages:", result["ambulance_coverage"]["served_villages"])
-    print("Unserved Villages:", result["ambulance_coverage"]["unserved_villages"])
-    print(
-        "Resources Used:",
-        f"{result['ambulance_coverage']['resources_used']}/"
-        f"{result['ambulance_coverage']['total_resources']}",
-    )
-
-    print("\nRESCUE TEAM COVERAGE")
-    print(
-        "Served Villages:",
-        result["rescue_team_coverage"]["served_villages"],
-    )
-    print(
-        "Unserved Villages:",
-        result["rescue_team_coverage"]["unserved_villages"],
-    )
-    print(
-        "Resources Used:",
-        f"{result['rescue_team_coverage']['resources_used']}/"
-        f"{result['rescue_team_coverage']['total_resources']}",
-    )

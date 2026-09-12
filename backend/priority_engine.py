@@ -23,7 +23,7 @@ def calculate_village_priority(
         road.connected_hospital for road in connected_roads
     }
 
-    population_score = min(village.population / 5000.0, 1.0)
+    population_score = min(village.population / 8000.0, 1.0)
 
     road_impact = 1.0 if any(
         road.id in affected_road_ids for road in connected_roads
@@ -52,6 +52,7 @@ def calculate_village_priority(
 
     return {
         "village_id": village_id,
+        "village_name": village.name,
         "population": village.population,
         "priority_score": round(priority_score, 2),
         "priority_level": priority_level,
@@ -90,13 +91,11 @@ if __name__ == "__main__":
     cascade_result = calculate_cascade(0.90)
     priorities = calculate_priorities(cascade_result)
 
-    print("\n--- PRIORITY ASSESSMENT ---")
+    print("\n--- REAL-WORLD PRIORITY ASSESSMENT ---")
     for item in priorities:
         print(
-            f"{item['village_id']} | "
+            f"{item['village_id']} ({item['village_name']}) | "
             f"Population: {item['population']} | "
             f"Priority: {item['priority_score']:.2f} | "
-            f"Level: {item['priority_level']} | "
-            f"Road Impact: {item['road_impact']} | "
-            f"Hospital Impact: {item['hospital_impact']}"
+            f"Level: {item['priority_level']}"
         )
