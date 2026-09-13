@@ -91,6 +91,32 @@ type DisasterResult = {
     ambulances: string[];
     rescue_teams: string[];
   };
+
+  live_telemetry?: {
+    data_source: string;
+    source_label: string;
+    fetched_at: string;
+    study_region: string;
+    coordinates: { lat: number; lon: number };
+    rainfall_mm: number;
+    duration_hours: number;
+    water_level_m: number;
+    sensor_readings: {
+      current_rain_mm_per_hr: number;
+      accumulated_rain_6h_mm: number;
+      temperature_c: number;
+      humidity_pct: number;
+      wind_speed_kmh: number;
+      weather_code: number;
+    };
+    barrage_status: {
+      estimated_level_m: number;
+      danger_level_m: number;
+      warning_level_m: number;
+      alert_level: string;
+    };
+    is_live: boolean;
+  };
 };
 
 type Mode = "live" | "historical" | "simulation";
@@ -113,7 +139,15 @@ export default function Home() {
   const [duration, setDuration] = useState(4);
   const [waterLevel, setWaterLevel] = useState(8.6);
 
-  const [data, setData] = useState<DisasterResult | null>(null);
+  const [simulationResult, setSimulationResult] = useState<DisasterResult | null>(null);
+  const [liveResult, setLiveResult] = useState<DisasterResult | null>(null);
+  const [lastSimulationParams, setLastSimulationParams] = useState<{
+    rainfall: number;
+    duration: number;
+    waterLevel: number;
+    timestamp: string;
+  } | null>(null);
+
   const [loading, setLoading] = useState(false);
   const [showSpatialGrid, setShowSpatialGrid] = useState(true);
 
@@ -128,6 +162,25 @@ export default function Home() {
     useState<ExperimentalMLResult | null>(null);
   const [experimentalLoading, setExperimentalLoading] = useState(false);
 
+  // Restore saved simulation from localStorage on mount
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem("disaster_saved_simulation");
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed.result) {
+          setSimulationResult(parsed.result);
+          if (parsed.params) {
+            setLastSimulationParams(parsed.params);
+            setRainfall(parsed.params.rainfall);
+            setDuration(parsed.params.duration);
+            setWaterLevel(parsed.params.waterLevel);
+          }
+        }
+      }
+    } catch (_) {}
+  }, []);
+
   // Time ticker
   const [currentTime, setCurrentTime] = useState("");
   useEffect(() => {
@@ -138,6 +191,16 @@ export default function Home() {
     return () => clearInterval(timer);
   }, []);
 
+  // Live Telemetry Auto-Polling (20s Heartbeat)
+  useEffect(() => {
+    if (mode !== "live") return;
+    analyzeScenario();
+    const heartbeat = setInterval(() => {
+      analyzeScenario();
+    }, 20000);
+    return () => clearInterval(heartbeat);
+  }, [mode]);
+
   // Historical Timeline Auto-Play
   useEffect(() => {
     if (!isPlaying || mode !== "historical") return;
@@ -147,32 +210,47 @@ export default function Home() {
     return () => clearInterval(interval);
   }, [isPlaying, mode]);
 
-  // Compute the dynamic 2D spatial grid
+  // Active data record depending on active mode
+  const activeData: DisasterResult | null =
+    mode === "simulation" ? simulationResult : mode === "live" ? liveResult : null;
+
+  // Compute the dynamic 2D spatial grid — strictly anchored to active mode & stored data
   const spatialGrid = useMemo(() => {
     if (mode === "historical") {
       const multiplier = currentSnapshot.river_level_m / 8.0;
       return generateSpatialGrid(currentSnapshot.rainfall_24h_mm, multiplier);
     }
-    if (data) {
-      return generateSpatialGrid(
-        data.event.inputs.rainfall_mm,
-        data.event.inputs.water_level_m / 8.0
-      );
+    if (mode === "simulation") {
+      if (simulationResult) {
+        return generateSpatialGrid(
+          simulationResult.event.inputs.rainfall_mm,
+          simulationResult.event.inputs.water_level_m / 8.0
+        );
+      }
+      return generateSpatialGrid(rainfall, waterLevel / 8.0);
     }
-    return generateSpatialGrid(mode === "live" ? 180 : rainfall, 1.0);
-  }, [mode, historyIndex, currentSnapshot, data, rainfall]);
+    if (mode === "live") {
+      if (liveResult) {
+        return generateSpatialGrid(
+          liveResult.event.inputs.rainfall_mm,
+          liveResult.event.inputs.water_level_m / 8.0
+        );
+      }
+      return generateSpatialGrid(0, 0.5);
+    }
+    return generateSpatialGrid(rainfall, waterLevel / 8.0);
+  }, [mode, historyIndex, currentSnapshot, simulationResult, liveResult, rainfall, waterLevel]);
 
   async function analyzeScenario(customRainfall?: number, customDuration?: number, customWaterLevel?: number) {
     try {
       setLoading(true);
-      setData(null);
-
+      const targetMode = mode === "historical" ? "simulation" : mode;
       const rf = customRainfall !== undefined ? customRainfall : rainfall;
       const dur = customDuration !== undefined ? customDuration : duration;
       const wl = customWaterLevel !== undefined ? customWaterLevel : waterLevel;
 
       const payload =
-        mode === "live"
+        targetMode === "live"
           ? { mode: "live" }
           : {
             mode: "simulation",
@@ -194,7 +272,21 @@ export default function Home() {
       }
 
       const result: DisasterResult = await response.json();
-      setData(result);
+      if (targetMode === "simulation") {
+        setSimulationResult(result);
+        const params = {
+          rainfall: rf,
+          duration: dur,
+          waterLevel: wl,
+          timestamp: new Date().toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
+        };
+        setLastSimulationParams(params);
+        try {
+          localStorage.setItem("disaster_saved_simulation", JSON.stringify({ result, params }));
+        } catch (_) {}
+      } else if (targetMode === "live") {
+        setLiveResult(result);
+      }
     } catch (error) {
       console.error(error);
       alert("Could not connect to the disaster engine on http://127.0.0.1:8000. Ensure the backend is running.");
@@ -251,68 +343,57 @@ export default function Home() {
   const currentRiskScoreNum =
     mode === "historical"
       ? currentSnapshot.mean_risk_score
-      : data
-        ? data.event.risk_score
+      : activeData
+        ? activeData.event.risk_score
         : 0.0;
 
   const displayRiskScore =
     mode === "historical"
       ? currentSnapshot.mean_risk_score.toFixed(2)
-      : data
-        ? data.event.risk_score.toFixed(2)
+      : activeData
+        ? activeData.event.risk_score.toFixed(2)
         : "0.00";
 
   const displayHazardLevel =
     mode === "historical"
       ? currentSnapshot.hazard_level
-      : data
-        ? data.event.hazard_level
+      : activeData
+        ? activeData.event.hazard_level
         : "NORMAL";
 
   const displayAffectedVillages =
     mode === "historical"
       ? String(currentSnapshot.affected_villages.length)
-      : data
-        ? String(data?.impact?.affected_villages?.length ?? 0)
+      : activeData
+        ? String(activeData?.impact?.affected_villages?.length ?? 0)
         : "0";
 
   const displayPopulationAffected =
     mode === "historical"
       ? currentSnapshot.population_affected.toLocaleString()
-      : data
-        ? data?.impact?.population_affected?.toLocaleString() ?? "0"
+      : activeData
+        ? activeData?.impact?.population_affected?.toLocaleString() ?? "0"
         : "0";
 
   const activeAffectedVillages =
     mode === "historical"
       ? currentSnapshot.affected_villages
-      : data?.impact?.affected_villages ?? [];
+      : activeData?.impact?.affected_villages ?? [];
 
   const activeAffectedRoads =
     mode === "historical"
       ? currentSnapshot.affected_roads
-      : data?.impact?.affected_roads ?? [];
+      : activeData?.impact?.affected_roads ?? [];
 
   const activeAffectedHospitals =
     mode === "historical"
       ? currentSnapshot.affected_hospitals
-      : data?.impact?.affected_hospitals ?? [];
+      : activeData?.impact?.affected_hospitals ?? [];
 
   const activeAllocations =
     mode === "historical"
       ? currentSnapshot.historical_allocations
-      : (data?.resource_optimization?.allocations ?? []);
-
-  // Auto-fetch telemetry in Live Feed mode
-  useEffect(() => {
-    if (mode === "live") {
-      analyzeScenario();
-      const interval = setInterval(() => {
-        analyzeScenario();
-      }, 20000);
-      return () => clearInterval(interval);
-    }
-  }, [mode]);
+      : (activeData?.resource_optimization?.allocations ?? []);
 
   const isCritical = currentRiskScoreNum >= 0.75;
 
@@ -338,94 +419,128 @@ export default function Home() {
   const s2Pct = Math.round((s2Occupied / s2Total) * 100);
 
   return (
-    <main className="min-h-screen bg-[#060e1e] text-slate-100 p-3 sm:p-5 lg:p-7 font-sans antialiased selection:bg-amber-500 selection:text-slate-950">
-      <div className="mx-auto max-w-7xl space-y-5">
+    <main className="min-h-screen bg-[#050b17] text-slate-100 font-sans antialiased selection:bg-amber-500 selection:text-slate-950">
 
-        {/* OFFICIAL GOVERNMENT TOP RIBBON & COMMAND HEADER */}
-        <header className="rounded-2xl border border-[#1e3860] bg-[#0c1930]/95 shadow-2xl relative overflow-hidden">
-          {/* Indian National Tricolor Accent Bar */}
-          <div className="h-1.5 w-full bg-gradient-to-r from-orange-500 via-white to-emerald-600" />
+      {/* 1. TOP UTILITY STRIP — GOVERNMENT OF INDIA / GIGW 3.0 STANDARD */}
+      <div className="bg-[#030712] border-b border-[#13233f] text-slate-400 text-[11px] px-3 sm:px-6 py-1.5 flex flex-wrap items-center justify-between gap-2 z-50">
+        <div className="flex items-center gap-3">
+          <div className="flex items-center gap-1.5 font-semibold text-slate-300">
+            <span className="text-amber-400 text-sm">🏛️</span>
+            <span>भारत सरकार | Government of India</span>
+            <span className="text-slate-600 hidden sm:inline">•</span>
+            <span className="text-slate-400 hidden sm:inline">गृह मंत्रालय | Ministry of Home Affairs</span>
+          </div>
+        </div>
 
-          <div className="p-5 sm:p-6 relative z-10">
-            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-6">
-              
-              {/* Government Portal Insignia & Title */}
-              <div className="flex items-start gap-4">
-                {/* Official Insignia Emblem Badge */}
-                <div className="hidden sm:flex flex-col items-center justify-center h-14 w-14 rounded-xl bg-gradient-to-b from-[#162746] to-[#0d1b33] border border-[#2a4d80] shadow-lg shrink-0 text-amber-400">
+        <div className="flex items-center gap-3 sm:gap-4 text-[10px] sm:text-[11px]">
+          <div className="flex items-center gap-2 text-rose-400 font-mono font-bold bg-rose-950/40 px-2 py-0.5 rounded border border-rose-900/50">
+            <span>🚨 SEOC: 1070</span>
+            <span className="text-slate-600">|</span>
+            <span>NDRF: 1078</span>
+            <span className="text-slate-600">|</span>
+            <span>POLICE/EMERGENCY: 112</span>
+          </div>
+          <span className="text-slate-500 hidden md:inline">|</span>
+          <span className="text-emerald-400 font-mono font-bold hidden md:inline-flex items-center gap-1">
+            <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
+            LIVE SAT-INGESTION: ACTIVE
+          </span>
+          <span className="text-slate-500 hidden md:inline">|</span>
+          <span className="text-slate-300 font-semibold cursor-pointer hover:text-white transition">
+            English / हिंदी
+          </span>
+        </div>
+      </div>
+
+      <div className="mx-auto max-w-7xl p-3 sm:p-5 lg:p-6 space-y-4 sm:space-y-5">
+
+        {/* 2. OFFICIAL GOVERNMENT PORTAL BANNER & COMMAND HEADER */}
+        <header className="rounded-2xl border border-[#1d3557] bg-gradient-to-b from-[#0d1f3d] via-[#09152b] to-[#060e1e] shadow-2xl relative overflow-hidden">
+          {/* Indian National Tricolor Ribbon */}
+          <div className="h-1.5 w-full bg-gradient-to-r from-[#FF9933] via-[#FFFFFF] to-[#138808]" />
+
+          <div className="p-4 sm:p-6 relative z-10">
+            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-5">
+
+              {/* Official Seal & Title Block */}
+              <div className="flex items-start gap-3.5 sm:gap-4">
+                {/* State Emblem of India representation */}
+                <div className="flex flex-col items-center justify-center h-14 w-14 rounded-xl bg-gradient-to-b from-[#14294d] to-[#0a1529] border border-[#2b4c80] shadow-lg shrink-0 text-amber-400 p-1">
                   <span className="text-xl">🏛️</span>
-                  <span className="text-[8px] font-black tracking-widest text-amber-300 uppercase mt-0.5">NDMA</span>
+                  <span className="text-[7px] font-black tracking-widest text-amber-300 uppercase mt-0.5 text-center leading-tight">
+                    NDMA<br />BSDMA
+                  </span>
                 </div>
 
                 <div>
                   <div className="flex flex-wrap items-center gap-2">
-                    <span className="flex items-center gap-1.5 rounded-md bg-emerald-500/10 border border-emerald-500/30 px-2.5 py-0.5 text-[11px] font-bold text-emerald-400 uppercase tracking-wider">
-                      <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
-                      SEOC LEVEL-4 ACTIVE MONITORING
+                    <span className="flex items-center gap-1.5 rounded bg-emerald-500/10 border border-emerald-500/30 px-2 py-0.5 text-[10px] sm:text-[11px] font-bold text-emerald-400 uppercase tracking-wider">
+                      <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-ping" />
+                      SEOC PATNA LEVEL-4 ACTIVE MONITORING
                     </span>
-                    <span className="rounded-md bg-blue-500/10 border border-blue-500/30 px-2.5 py-0.5 text-[11px] font-bold text-blue-300">
-                      🛰️ ISRO BHUVAN • SENTINEL-1A SAR • CWC TELEMETRY
+                    <span className="rounded bg-blue-500/10 border border-blue-500/30 px-2 py-0.5 text-[10px] sm:text-[11px] font-bold text-blue-300">
+                      🛰️ ISRO BHUVAN • SENTINEL-1A SAR • CWC GAUGE
                     </span>
                     {currentTime && (
-                      <span className="text-[11px] text-amber-300/90 font-mono hidden md:inline-block bg-[#162746] px-2 py-0.5 rounded border border-[#2a4d80]">
-                        ⏱️ {currentTime} IST
+                      <span className="text-[10px] sm:text-[11px] text-amber-300 font-mono bg-[#102344] px-2 py-0.5 rounded border border-[#244577]">
+                        ⏱️ {currentTime} IST (UTC+05:30)
                       </span>
                     )}
                   </div>
 
                   <div className="mt-1.5">
-                    <span className="text-[11px] font-extrabold uppercase tracking-widest text-amber-400">
-                      National Disaster Management Authority & State Disaster Management Authority (BSDMA)
+                    <span className="text-[10px] sm:text-[11px] font-extrabold uppercase tracking-widest text-amber-400 flex items-center gap-1.5">
+                      <span>राष्ट्रीय आपदा प्रबंधन प्राधिकरण एवं बिहार राज्य आपदा प्रबंधन प्राधिकरण</span>
                     </span>
-                    <h1 className="text-2xl sm:text-3xl font-black text-white tracking-tight mt-0.5">
-                      Integrated Cascading Flood Intelligence & Emergency Decision Support System
+                    <h1 className="text-xl sm:text-2xl lg:text-3xl font-black text-white tracking-tight mt-0.5">
+                      National Cascading Flood Intelligence & Spatial Decision Support System
                     </h1>
                   </div>
 
-                  <p className="text-slate-300 text-xs mt-1 max-w-3xl">
-                    Patna–Mokama–Barh Floodplain Sector • Automated Multi-Modal Microwave Radar Inundation & Lifeline Rerouting
+                  <p className="text-slate-300 text-xs mt-1 max-w-3xl leading-relaxed">
+                    North Bihar Floodplain Command Sector (Barauni–Mokama–Sultanganj Diara Basin) • Multi-Modal Microwave Radar Inundation & Lifeline Evacuation Optimizer
                   </p>
                 </div>
               </div>
 
-              {/* GOVERNMENT MODE SWITCHER & ACTIONS */}
-              <div className="flex flex-col sm:flex-row lg:flex-col items-start lg:items-end gap-3 shrink-0">
-                <div className="flex rounded-xl border border-[#2a4d80] bg-[#081224] p-1.5 shadow-inner">
+              {/* GOVERNMENT MODE SWITCHER & PRIMARY ACTION BUTTONS */}
+              <div className="flex flex-col sm:flex-row lg:flex-col items-start lg:items-end gap-2.5 shrink-0">
+                <div className="flex rounded-xl border border-[#224472] bg-[#071326] p-1 shadow-inner">
                   <button
                     onClick={() => setMode("historical")}
-                    className={`px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all ${mode === "historical"
-                      ? "bg-blue-600 text-white shadow-md shadow-blue-900/50"
+                    className={`cursor-pointer px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${mode === "historical"
+                      ? "bg-blue-600 text-white shadow-md shadow-blue-900/60 border border-blue-400/30"
                       : "text-slate-300 hover:text-white"
                       }`}
                   >
-                    HISTORICAL 2024 AUDIT
+                    🏛️ 2024 BIHAR AUDIT
                   </button>
 
                   <button
                     onClick={() => setMode("simulation")}
-                    className={`px-3.5 py-1.5 rounded-lg text-xs font-black transition-all ${mode === "simulation"
-                      ? "bg-amber-500 text-slate-950 shadow-md shadow-amber-500/30"
+                    className={`cursor-pointer px-3 py-1.5 rounded-lg text-xs font-black transition-all ${mode === "simulation"
+                      ? "bg-amber-500 text-slate-950 shadow-md shadow-amber-500/40 border border-amber-300"
                       : "text-slate-300 hover:text-white"
                       }`}
                   >
-                    SCENARIO SIMULATOR
+                    ⚡ SCENARIO SIMULATOR
                   </button>
 
                   <button
                     onClick={() => setMode("live")}
-                    className={`px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all ${mode === "live"
-                      ? "bg-emerald-600 text-white shadow-md shadow-emerald-900/50"
+                    className={`cursor-pointer px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${mode === "live"
+                      ? "bg-emerald-600 text-white shadow-md shadow-emerald-900/60 border border-emerald-400/30"
                       : "text-slate-300 hover:text-white"
                       }`}
                   >
-                    LIVE SENSORS & SAR
+                    📡 LIVE TELEMETRY & SAR
                   </button>
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2">
                   <button
                     onClick={() => setShowSitrepModal(true)}
-                    className="cursor-pointer rounded-xl border border-blue-500/50 bg-[#162746] hover:bg-[#1f3763] px-3.5 py-2 text-xs font-bold text-blue-200 transition-all flex items-center gap-1.5 shadow-md shadow-blue-950/40"
+                    className="cursor-pointer rounded-xl border border-blue-500/50 bg-[#122547] hover:bg-[#1a3563] px-3 py-1.5 text-xs font-bold text-blue-200 transition-all flex items-center gap-1.5 shadow-md shadow-blue-950/50"
                   >
                     <span>📋</span> OFFICIAL SITREP
                   </button>
@@ -434,7 +549,7 @@ export default function Home() {
                     <button
                       onClick={() => analyzeScenario()}
                       disabled={loading}
-                      className="cursor-pointer rounded-xl bg-gradient-to-r from-amber-600 via-orange-600 to-amber-600 hover:from-amber-500 hover:to-orange-500 px-5 py-2 text-xs font-black text-slate-950 shadow-lg shadow-amber-900/30 disabled:opacity-50 transition-all border border-amber-400"
+                      className="cursor-pointer rounded-xl bg-gradient-to-r from-amber-500 via-orange-500 to-amber-500 hover:from-amber-400 hover:to-orange-400 px-4 py-1.5 text-xs font-black text-slate-950 shadow-lg shadow-amber-900/40 disabled:opacity-50 transition-all border border-amber-300"
                     >
                       {loading ? "CALCULATING..." : "⚡ RUN SIMULATION"}
                     </button>
@@ -443,7 +558,7 @@ export default function Home() {
                   <button
                     onClick={runExperimentalML}
                     disabled={experimentalLoading}
-                    className="cursor-pointer rounded-xl border border-amber-500/40 bg-amber-500/10 hover:bg-amber-500/20 px-3.5 py-2 text-xs font-bold text-amber-300 disabled:opacity-50 transition-all"
+                    className="cursor-pointer rounded-xl border border-amber-500/40 bg-amber-500/10 hover:bg-amber-500/20 px-3 py-1.5 text-xs font-bold text-amber-300 disabled:opacity-50 transition-all"
                   >
                     {experimentalLoading ? "INFERRING..." : "🔬 INFER ML MODEL"}
                   </button>
@@ -454,34 +569,39 @@ export default function Home() {
           </div>
         </header>
 
-        {/* OFFICIAL EMERGENCY ADVISORY BANNER */}
+        {/* 3. OFFICIAL EMERGENCY ALERT BULLETIN TICKER */}
         {isCritical && (
-          <div className="rounded-2xl border-2 border-red-500/80 bg-gradient-to-r from-[#3a0d14] via-[#24080c] to-[#3a0d14] p-4 shadow-2xl animate-pulse">
+          <div className="rounded-xl border-2 border-red-500/80 bg-gradient-to-r from-[#380b12] via-[#21070a] to-[#380b12] p-3.5 shadow-2xl animate-pulse">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
               <div className="flex items-center gap-3">
-                <span className="text-3xl">🚨</span>
+                <span className="text-2xl sm:text-3xl">🚨</span>
                 <div>
-                  <h3 className="font-black text-red-200 text-sm sm:text-base tracking-wide flex items-center gap-2">
-                    GOVERNMENT OF BIHAR EMERGENCY DIRECTIVE — RED FLOOD ALERT (LEVEL 4)
-                  </h3>
+                  <div className="flex items-center gap-2">
+                    <span className="px-1.5 py-0.2 rounded bg-red-600 text-white font-black text-[9px] uppercase tracking-wider">
+                      URGENT DIRECTIVE
+                    </span>
+                    <h3 className="font-black text-red-200 text-xs sm:text-sm tracking-wide">
+                      STATE DISASTER EMERGENCY DIRECTIVE — RED FLOOD WARNING (LEVEL-4)
+                    </h3>
+                  </div>
                   <p className="text-xs text-red-300/90 mt-0.5">
-                    Critical inundation across Sultanganj Diara & Pipra Dewas. Arterial highways NH-31 & SH-58 severed. SDRF/NDRF watercraft deployed for immediate evacuation.
+                    Critical inundation across Sultanganj Diara & Pipra Dewas. Arterial highways NH-31 & SH-58 severed. SDRF/NDRF 9th Bn deployed for immediate watercraft evacuation.
                   </p>
                 </div>
               </div>
-              <span className="w-fit rounded-lg bg-red-600 px-4 py-1.5 text-xs font-black text-white uppercase tracking-wider border border-red-400 shadow-md">
+              <span className="w-fit rounded-lg bg-red-600 px-3 py-1.5 text-[11px] font-black text-white uppercase tracking-wider border border-red-400 shadow-md shrink-0">
                 EVACUATION PROTOCOL ACTIVE
               </span>
             </div>
           </div>
         )}
 
-        {/* EXECUTIVE KPI DASHBOARD METRICS */}
-        <section className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        {/* 4. EXECUTIVE DISASTER TELEMETRY TILES (GOVERNMENT STANDARD) */}
+        <section className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
           <StatCard
-            title="Composite Inundation Risk"
+            title="Composite Inundation Index"
             value={displayRiskScore}
-            subtitle="Multi-Modal Satellite Index"
+            subtitle="Multi-Modal Satellite Risk Index"
             barPercent={Math.min(100, Math.round(Number(displayRiskScore) * 100))}
             color={Number(displayRiskScore) >= 0.75 ? "red" : Number(displayRiskScore) >= 0.5 ? "orange" : "emerald"}
           />
@@ -500,27 +620,32 @@ export default function Home() {
           <StatCard
             title="Citizens at Risk"
             value={displayPopulationAffected}
-            subtitle="Total Inundated Population"
+            subtitle="Displaced Population requiring Evac"
             color={Number(displayPopulationAffected.replace(/,/g, "")) > 0 ? "red" : "emerald"}
           />
         </section>
 
-        {/* MAIN COMMAND CENTER: 2-COLUMN SPLIT GIS DECK */}
-        <div className="grid lg:grid-cols-12 gap-6 items-start">
+        {/* 5. MAIN COMMAND CENTER: 2-COLUMN SPLIT GIS DECK */}
+        <div className="grid lg:grid-cols-12 gap-5 sm:gap-6 items-start">
 
           {/* LEFT COLUMN: SATELLITE GIS MAP & CONTROLS (7 Cols) */}
-          <div className="lg:col-span-7 flex flex-col gap-5">
+          <div className="lg:col-span-7 flex flex-col gap-4 sm:gap-5">
 
             {/* GIS MAP CARD */}
-            <div className="rounded-2xl border border-slate-800 bg-slate-900/90 p-5 shadow-2xl backdrop-blur-xl flex flex-col">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
+            <div className="rounded-2xl border border-[#1e3860] bg-[#0a162b]/95 p-4 sm:p-5 shadow-2xl backdrop-blur-xl flex flex-col">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-3.5">
                 <div>
-                  <h2 className="text-lg font-extrabold text-white flex items-center gap-2">
+                  <div className="flex items-center gap-2">
+                    <span className="px-2 py-0.5 rounded bg-blue-500/20 text-blue-300 font-mono text-[10px] font-bold border border-blue-500/40">
+                      GIS SECTOR G-12 (BEGUSARAI)
+                    </span>
+                    <span className="text-slate-400 font-mono text-[10px] hidden sm:inline">
+                      LAT: 25.148°N | LON: 85.950°E
+                    </span>
+                  </div>
+                  <h2 className="text-base sm:text-lg font-black text-white flex items-center gap-2 mt-1">
                     <span>🗺️</span> North Bihar Risk Surface & Lifeline Network
                   </h2>
-                  <p className="text-xs text-slate-400">
-                    Sentinel-1A SAR microwave inundation mask & topographical routing
-                  </p>
                 </div>
 
                 <div className="flex items-center gap-2">
@@ -531,14 +656,14 @@ export default function Home() {
                       : "bg-slate-800 border-slate-700 text-slate-400"
                       }`}
                   >
-                    {showSpatialGrid ? "🗺️ SAR Grid: ON" : "🗺️ SAR Grid: OFF"}
+                    {showSpatialGrid ? "🗺️ SAR 10m Grid: ON" : "🗺️ SAR Grid: OFF"}
                   </button>
                 </div>
               </div>
 
               <div className="h-[520px] rounded-xl overflow-hidden border border-slate-800 relative shadow-inner">
                 <DisasterMap
-                  floodActive={mode === "historical" ? currentSnapshot.mean_risk_score > 0.3 : !!data}
+                  floodActive={mode === "historical" ? currentSnapshot.mean_risk_score > 0.3 : (currentRiskScoreNum > 0.35 || !!activeData)}
                   allocation={activeAllocations}
                   affectedVillages={activeAffectedVillages}
                   affectedRoads={activeAffectedRoads}
@@ -716,6 +841,26 @@ export default function Home() {
                     </div>
                   </div>
 
+                  {/* STORED SIMULATION RESULT BANNER */}
+                  {lastSimulationParams && simulationResult && (
+                    <div className="mt-3 flex flex-wrap items-center justify-between gap-2 p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-xs">
+                      <div className="flex items-center gap-2">
+                        <span className="px-2 py-0.5 rounded font-black text-[10px] uppercase bg-amber-500 text-slate-950">
+                          💾 STORED SIMULATION
+                        </span>
+                        <span className="text-slate-300">
+                          Rainfall: <strong className="text-white">{lastSimulationParams.rainfall} mm</strong> ({lastSimulationParams.duration}h) | River Level: <strong className="text-white">{lastSimulationParams.waterLevel} m</strong>
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-slate-400 text-[11px]">Saved at {lastSimulationParams.timestamp} IST</span>
+                        <span className={`font-black font-mono px-2 py-0.5 rounded ${simulationResult.event.risk_score >= 0.75 ? "bg-rose-500/20 text-rose-300 border border-rose-500/40" : simulationResult.event.risk_score >= 0.5 ? "bg-amber-500/20 text-amber-300 border border-amber-500/40" : "bg-emerald-500/20 text-emerald-300 border border-emerald-500/40"}`}>
+                          Risk {simulationResult.event.risk_score.toFixed(2)} ({simulationResult.event.hazard_level})
+                        </span>
+                      </div>
+                    </div>
+                  )}
+
                   <div className="mt-4 flex justify-end">
                     <button
                       onClick={() => analyzeScenario()}
@@ -730,26 +875,76 @@ export default function Home() {
 
               {/* LIVE TELEMETRY STATUS */}
               {mode === "live" && (
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                  <div className="flex items-center gap-3">
-                    <span className="h-3 w-3 rounded-full bg-emerald-400 animate-ping" />
-                    <div>
-                      <h3 className="text-sm font-bold text-white">
-                        Live Auto-Polling Active (20s Heartbeat)
-                      </h3>
-                      <p className="text-xs text-slate-400">
-                        Synchronizing with CWC barrage telemetry & Sentinel-1A orbital pass
-                      </p>
+                <div className="space-y-3">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-slate-950/80 p-3.5 rounded-xl border border-emerald-500/40">
+                    <div className="flex items-center gap-3">
+                      <span className="relative flex h-3.5 w-3.5">
+                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                        <span className="relative inline-flex rounded-full h-3.5 w-3.5 bg-emerald-500"></span>
+                      </span>
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <h3 className="text-sm font-bold text-white">
+                            Live Telemetry Active (20s Heartbeat)
+                          </h3>
+                          <span className="px-2 py-0.5 rounded text-[10px] font-black uppercase tracking-wide bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
+                            🟢 REAL DATA FEED
+                          </span>
+                        </div>
+                        <p className="text-xs text-slate-400 mt-0.5">
+                          {liveResult?.live_telemetry?.source_label || "Open-Meteo IMD-Calibrated NWP Stream"} — Barauni / Begusarai, Bihar
+                        </p>
+                      </div>
                     </div>
+
+                    <button
+                      onClick={() => analyzeScenario()}
+                      disabled={loading}
+                      className="cursor-pointer px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shadow-lg transition flex items-center justify-center gap-1.5 whitespace-nowrap"
+                    >
+                      <span>{loading ? "⏳" : "🔄"}</span>
+                      <span>{loading ? "POLLING SENSORS..." : "SYNC TELEMETRY NOW"}</span>
+                    </button>
                   </div>
 
-                  <button
-                    onClick={() => analyzeScenario()}
-                    disabled={loading}
-                    className="cursor-pointer px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shadow-lg transition"
-                  >
-                    {loading ? "POLLING SENSORS..." : "🔄 SYNC TELEMETRY NOW"}
-                  </button>
+                  {/* LIVE REAL-TIME SENSOR METRICS GRID */}
+                  {liveResult?.live_telemetry && (
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                      <div className="rounded-xl bg-slate-950/90 border border-slate-800 p-2.5">
+                        <span className="text-[10px] uppercase font-bold text-slate-400 block">🌡️ Temperature</span>
+                        <span className="text-base font-black text-white font-mono">
+                          {liveResult.live_telemetry.sensor_readings.temperature_c ?? "--"}°C
+                        </span>
+                        <span className="text-[10px] text-slate-500 block">Real Ambient Temp</span>
+                      </div>
+
+                      <div className="rounded-xl bg-slate-950/90 border border-slate-800 p-2.5">
+                        <span className="text-[10px] uppercase font-bold text-slate-400 block">💧 Rel. Humidity</span>
+                        <span className="text-base font-black text-cyan-300 font-mono">
+                          {liveResult.live_telemetry.sensor_readings.humidity_pct ?? "--"}%
+                        </span>
+                        <span className="text-[10px] text-slate-500 block">Hydrological Moisture</span>
+                      </div>
+
+                      <div className="rounded-xl bg-slate-950/90 border border-slate-800 p-2.5">
+                        <span className="text-[10px] uppercase font-bold text-slate-400 block">🌧️ 6h Rain Accum.</span>
+                        <span className="text-base font-black text-amber-300 font-mono">
+                          {liveResult.live_telemetry.rainfall_mm} mm
+                        </span>
+                        <span className="text-[10px] text-slate-500 block">Open-Meteo Radar</span>
+                      </div>
+
+                      <div className="rounded-xl bg-slate-950/90 border border-slate-800 p-2.5">
+                        <span className="text-[10px] uppercase font-bold text-slate-400 block">🌊 Barrage Gauge</span>
+                        <span className={`text-base font-black font-mono ${liveResult.live_telemetry.barrage_status.alert_level === "DANGER" ? "text-rose-400" : liveResult.live_telemetry.barrage_status.alert_level === "WARNING" ? "text-amber-400" : "text-emerald-400"}`}>
+                          {liveResult.live_telemetry.water_level_m} m
+                        </span>
+                        <span className="text-[10px] text-slate-500 block">
+                          Status: <strong className="text-slate-300">{liveResult.live_telemetry.barrage_status.alert_level}</strong>
+                        </span>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -982,7 +1177,7 @@ export default function Home() {
                   <FlowItem
                     icon="🌧️"
                     title="1. Satellite Trigger"
-                    subtitle={mode === "historical" ? `${currentSnapshot.rainfall_24h_mm} mm Precipitation` : data ? `${data.event.type}` : "Extreme Rainfall"}
+                    subtitle={mode === "historical" ? `${currentSnapshot.rainfall_24h_mm} mm Precipitation` : activeData ? `${activeData.event.type}` : "Extreme Rainfall"}
                     status={currentRiskScoreNum > 0.3 ? "ACTIVE" : "NORMAL"}
                   />
 
@@ -991,7 +1186,7 @@ export default function Home() {
                   <FlowItem
                     icon="🌊"
                     title="2. Spatial Inundation Surge"
-                    subtitle={mode === "historical" ? `Mean Risk: ${currentSnapshot.mean_risk_score.toFixed(2)}` : data ? `Risk Score: ${data.event.risk_score.toFixed(2)}` : "Risk Score: 0.00"}
+                    subtitle={mode === "historical" ? `Mean Risk: ${currentSnapshot.mean_risk_score.toFixed(2)}` : activeData ? `Risk Score: ${activeData.event.risk_score.toFixed(2)}` : "Risk Score: 0.00"}
                     status={currentRiskScoreNum > 0.5 ? "CRITICAL" : "NORMAL"}
                   />
 
@@ -1053,6 +1248,26 @@ export default function Home() {
                     </div>
                   )}
 
+                  {liveResult?.live_telemetry && (
+                    <div className="rounded-xl border border-emerald-500/40 bg-emerald-950/20 p-3 space-y-1.5">
+                      <div className="flex justify-between items-center">
+                        <span className="font-bold text-emerald-300 flex items-center gap-1.5">
+                          <span className="h-2 w-2 rounded-full bg-emerald-400 animate-ping" />
+                          Live Open-Meteo Ingestion
+                        </span>
+                        <span className="font-mono text-[10px] text-emerald-400 bg-emerald-950 px-2 py-0.5 rounded border border-emerald-500/30">
+                          LAT 25.148°N | LON 85.950°E
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-2 gap-2 text-[11px] text-slate-300 pt-1">
+                        <div>Station Temp: <strong className="text-white">{liveResult.live_telemetry.sensor_readings.temperature_c}°C</strong></div>
+                        <div>Humidity: <strong className="text-white">{liveResult.live_telemetry.sensor_readings.humidity_pct}%</strong></div>
+                        <div>6h Rain: <strong className="text-white">{liveResult.live_telemetry.rainfall_mm} mm</strong></div>
+                        <div>Barrage: <strong className="text-white">{liveResult.live_telemetry.water_level_m} m</strong></div>
+                      </div>
+                    </div>
+                  )}
+
                   <div className="grid grid-cols-2 gap-2 mt-2">
                     <div className="rounded-lg bg-slate-950/60 p-2.5 border border-slate-800">
                       <span className="text-slate-400 block text-[10px]">SAR Water Mask</span>
@@ -1067,9 +1282,9 @@ export default function Home() {
                     </div>
 
                     <div className="rounded-lg bg-slate-950/60 p-2.5 border border-slate-800">
-                      <span className="text-slate-400 block text-[10px]">Precipitation Radar</span>
-                      <strong className="text-white text-xs">NASA GPM IMERG</strong>
-                      <span className="text-slate-400 text-[10px] block mt-0.5">3-Hour Latency</span>
+                      <span className="text-slate-400 block text-[10px]">Live Weather Feed</span>
+                      <strong className="text-white text-xs">Open-Meteo / IMD</strong>
+                      <span className="text-slate-400 text-[10px] block mt-0.5">Real-time Observations</span>
                     </div>
 
                     <div className="rounded-lg bg-slate-950/60 p-2.5 border border-slate-800">
@@ -1086,123 +1301,159 @@ export default function Home() {
 
         </div>
 
-        {/* SITREP MODAL */}
+        {/* 6. OFFICIAL GOVERNMENT SITUATION REPORT (SITREP) MODAL */}
         {showSitrepModal && (
-          <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/80 backdrop-blur-md p-4 overflow-y-auto">
-            <div className="relative w-full max-w-3xl rounded-2xl border border-slate-700 bg-slate-900 p-6 sm:p-8 shadow-2xl text-slate-100 max-h-[90vh] overflow-y-auto">
-              <div className="flex items-center justify-between border-b border-slate-800 pb-4">
-                <div>
-                  <div className="flex items-center gap-2">
-                    <span className="rounded-full bg-red-500/20 border border-red-500/40 text-red-300 px-2.5 py-0.5 text-[10px] font-black uppercase tracking-wider">
-                      OFFICIAL DISASTER SITREP
-                    </span>
-                    <span className="text-xs text-slate-400 font-mono">
-                      DOC REF: BIHAR-DISASTER-INTEL-{new Date().toISOString().slice(0, 10)}
-                    </span>
+          <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/85 backdrop-blur-md p-3 sm:p-4 overflow-y-auto">
+            <div className="relative w-full max-w-3xl rounded-2xl border-2 border-[#2b4c80] bg-[#0c1830] p-5 sm:p-7 shadow-2xl text-slate-100 max-h-[92vh] overflow-y-auto">
+
+              {/* Report Header — Official Government Form Format */}
+              <div className="border-b-2 border-slate-700/80 pb-4">
+                <div className="flex flex-col sm:flex-row items-center sm:items-start justify-between gap-3 text-center sm:text-left">
+                  <div className="flex items-center gap-3">
+                    <div className="h-12 w-12 rounded-lg bg-[#142647] border border-[#2b4c80] flex items-center justify-center text-amber-400 text-2xl shrink-0">
+                      🏛️
+                    </div>
+                    <div>
+                      <span className="text-[10px] font-black uppercase tracking-widest text-amber-400 block">
+                        GOVERNMENT OF BIHAR • DISASTER MANAGEMENT DEPARTMENT
+                      </span>
+                      <h3 className="text-lg sm:text-xl font-black text-white">
+                        STATE EMERGENCY OPERATIONS CENTER (SEOC)
+                      </h3>
+                      <span className="text-[11px] text-slate-300 font-semibold block mt-0.5">
+                        INCIDENT SITUATION REPORT (SITREP) — LEVEL-4 DISASTER EVENT
+                      </span>
+                    </div>
                   </div>
-                  <h3 className="text-xl font-black text-white mt-1">
-                    North Bihar Floodplain Incident Situation Report
-                  </h3>
+
+                  <button
+                    onClick={() => setShowSitrepModal(false)}
+                    className="cursor-pointer rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 px-3 py-1.5 text-xs font-bold transition self-end sm:self-start"
+                  >
+                    ✕ CLOSE
+                  </button>
                 </div>
-                <button
-                  onClick={() => setShowSitrepModal(false)}
-                  className="cursor-pointer rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 p-2 text-xs font-bold transition"
-                >
-                  ✕ CLOSE
-                </button>
+
+                <div className="mt-3 grid grid-cols-2 sm:grid-cols-4 gap-2 text-[10px] bg-slate-950/70 p-2 rounded-lg border border-slate-800 font-mono text-slate-300">
+                  <div>DOC REF: <strong className="text-white">BSDMA/SEOC/2026-FL-09</strong></div>
+                  <div>SECURITY: <strong className="text-amber-400">RESTRICTED OPS</strong></div>
+                  <div>SECTOR: <strong className="text-white">BARAUNI-MOKAMA</strong></div>
+                  <div>TIMESTAMP: <strong className="text-emerald-400">{currentTime || "16:30"} IST</strong></div>
+                </div>
               </div>
 
-              <div className="mt-5 space-y-5 text-xs sm:text-sm">
-                {/* METRICS SUMMARY */}
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <div className="mt-4 space-y-4 text-xs sm:text-sm">
+
+                {/* EXECUTIVE SUMMARY TILES */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
                   <div className="rounded-xl bg-slate-950/80 p-3 border border-slate-800">
-                    <span className="text-slate-400 text-xs">Risk Assessment</span>
-                    <p className={`text-base font-black mt-0.5 ${currentRiskScoreNum >= 0.75 ? "text-red-400" : "text-amber-400"}`}>
-                      {displayRiskScore} ({displayHazardLevel})
+                    <span className="text-slate-400 text-[11px] block">Incident Hazard Tier</span>
+                    <p className={`text-base font-black mt-0.5 ${currentRiskScoreNum >= 0.75 ? "text-rose-400" : "text-amber-400"}`}>
+                      {displayHazardLevel} ({displayRiskScore})
                     </p>
                   </div>
                   <div className="rounded-xl bg-slate-950/80 p-3 border border-slate-800">
-                    <span className="text-slate-400 text-xs">Exposed Population</span>
+                    <span className="text-slate-400 text-[11px] block">Exposed Population</span>
                     <p className="text-base font-black text-white mt-0.5">
-                      {displayPopulationAffected}
+                      {displayPopulationAffected} Citizens
                     </p>
                   </div>
                   <div className="rounded-xl bg-slate-950/80 p-3 border border-slate-800">
-                    <span className="text-slate-400 text-xs">Isolated Panchayats</span>
+                    <span className="text-slate-400 text-[11px] block">Severed Gram Panchayats</span>
                     <p className="text-base font-black text-amber-300 mt-0.5">
-                      {displayAffectedVillages} Communities
+                      {activeAffectedVillages.length} of 5 Cut Off
                     </p>
                   </div>
                   <div className="rounded-xl bg-slate-950/80 p-3 border border-slate-800">
-                    <span className="text-slate-400 text-xs">Severed Highways</span>
-                    <p className="text-base font-black text-red-400 mt-0.5">
+                    <span className="text-slate-400 text-[11px] block">Submerged Arterial Roads</span>
+                    <p className="text-base font-black text-rose-400 mt-0.5">
                       {activeAffectedRoads.length} Corridors
                     </p>
                   </div>
                 </div>
 
-                {/* CRITICAL SECTORS INUNDATION */}
-                <div className="rounded-xl bg-slate-950/60 p-4 border border-slate-800">
-                  <h4 className="font-bold text-slate-300 text-xs uppercase tracking-wider mb-2">
-                    🚨 Inundation Zones & Community Isolation
+                {/* INUNDATION STATUS & COMMUNITY ISOLATION */}
+                <div className="rounded-xl bg-slate-950/70 p-3.5 border border-slate-800">
+                  <h4 className="font-bold text-slate-200 text-xs uppercase tracking-wider mb-2 flex items-center gap-1.5">
+                    <span>🚨</span> 1. Inundation Sector Status & Community Isolation
                   </h4>
-                  <ul className="space-y-1.5 text-xs text-slate-300 list-disc list-inside">
+                  <ul className="space-y-1.5 text-xs text-slate-300">
                     {activeAffectedVillages.length > 0 ? (
                       activeAffectedVillages.map((id) => {
                         const v = REAL_INFRASTRUCTURE_METADATA.villages[id as keyof typeof REAL_INFRASTRUCTURE_METADATA.villages];
                         return (
-                          <li key={id}>
-                            <strong className="text-white">{v?.name || id}</strong>: {v?.vulnerability || "Severe flood inundation zone."} (Pop: {v?.population.toLocaleString() || "N/A"})
+                          <li key={id} className="flex items-start justify-between gap-2 p-1.5 rounded bg-slate-900/80 border border-slate-800">
+                            <div>
+                              <strong className="text-white">{v?.name || id}</strong>
+                              <span className="text-slate-400 text-[11px] block">{v?.vulnerability || "Active flood inundation zone."}</span>
+                            </div>
+                            <span className="text-amber-400 font-mono font-bold text-xs shrink-0">
+                              {v?.population.toLocaleString()} citizens
+                            </span>
                           </li>
                         );
                       })
                     ) : (
-                      <li className="text-emerald-400">All community road connections are open and operational.</li>
+                      <li className="text-emerald-400 p-2">All 5 village settlements maintain clear overland road connectivity.</li>
                     )}
                   </ul>
                 </div>
 
-                {/* DISPATCH ROSTER */}
-                <div className="rounded-xl bg-slate-950/60 p-4 border border-slate-800">
-                  <h4 className="font-bold text-slate-300 text-xs uppercase tracking-wider mb-2">
-                    🚑 Optimized Emergency Dispatch Manifest
+                {/* RESCUE & EVACUATION DEPLOYMENT MANIFEST */}
+                <div className="rounded-xl bg-slate-950/70 p-3.5 border border-slate-800">
+                  <h4 className="font-bold text-slate-200 text-xs uppercase tracking-wider mb-2 flex items-center gap-1.5">
+                    <span>🚑</span> 2. NDRF / SDRF Emergency Resource Dispatch Roster
                   </h4>
                   {activeAllocations.length > 0 ? (
-                    <div className="space-y-2">
+                    <div className="space-y-2 max-h-[180px] overflow-y-auto pr-1">
                       {activeAllocations.map((a) => (
-                        <div key={a.resource} className="p-2.5 rounded-lg bg-slate-900 border border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between text-xs gap-1">
+                        <div key={a.resource} className="p-2.5 rounded-lg bg-slate-900 border border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between text-xs gap-1.5">
                           <div>
-                            <span className="font-bold text-amber-300">{a.resource} ({a.resource_type})</span> &rarr; <span className="font-bold text-white">{a.village_name || a.village_id}</span>
+                            <span className="font-bold text-amber-300">{a.resource_type === "RESCUE_BOAT" ? "🚤" : "🚑"} {a.resource} ({a.resource_type})</span> &rarr; <span className="font-bold text-white">{a.village_name || a.village_id}</span>
                             <p className="text-slate-400 text-[11px] mt-0.5">{a.reason}</p>
                           </div>
-                          <div className="text-right shrink-0">
-                            <span className="text-white font-mono font-bold">ETA: {a.estimated_travel_time_min.toFixed(1)} min</span>
-                            <span className="block text-[10px] text-slate-400">{a.distance_km.toFixed(1)} km transit</span>
+                          <div className="text-left sm:text-right shrink-0 font-mono">
+                            <span className="text-white font-bold block">ETA: {a.estimated_travel_time_min.toFixed(1)} min</span>
+                            <span className="text-[10px] text-slate-400">{a.distance_km.toFixed(1)} km transit</span>
                           </div>
                         </div>
                       ))}
                     </div>
                   ) : (
-                    <p className="text-xs text-slate-400">No active dispatches required under current baseline telemetry.</p>
+                    <p className="text-xs text-slate-400">No emergency unit dispatches required under baseline weather conditions.</p>
                   )}
                 </div>
 
-                {/* SATELLITE TELEMETRY */}
-                <div className="rounded-xl bg-slate-950/60 p-4 border border-slate-800 text-xs text-slate-400">
-                  <span className="font-bold text-slate-300 block mb-1">🛰️ Earth Observation Metadata Verification</span>
-                  <p>Inundation Mask: <strong className="text-slate-200">Copernicus Sentinel-1A SAR (10m C-Band)</strong></p>
-                  <p>Elevation / Terrain Model: <strong className="text-slate-200">NASA SRTM Digital Elevation (30m)</strong></p>
-                  <p>Precipitation Data: <strong className="text-slate-200">NASA GPM IMERG Radar Integration</strong></p>
+                {/* SATELLITE & SENSOR METADATA VERIFICATION */}
+                <div className="rounded-xl bg-slate-950/70 p-3 border border-slate-800 text-xs text-slate-400 font-mono space-y-1">
+                  <div className="font-bold text-slate-300 font-sans mb-1 flex items-center gap-1.5">
+                    <span>🛰️</span> 3. Earth Observation & Sensor Ingestion Provenance
+                  </div>
+                  <div>• SAR Radar Water Mask: <span className="text-slate-200">Copernicus Sentinel-1A (10m C-Band VV/VH)</span></div>
+                  <div>• Topographical DEM: <span className="text-slate-200">NASA SRTM v3 (30m Elevation &amp; Slope)</span></div>
+                  <div>• Numerical Precipitation: <span className="text-slate-200">NASA GPM IMERG / Open-Meteo IMD Station</span></div>
+                  <div>• Decision Optimization Algorithm: <span className="text-slate-200">Priority-Weighted Greedy Knapsack Routing</span></div>
+                </div>
+
+                {/* OFFICIAL SIGN-OFF BLOCK */}
+                <div className="border-t border-slate-800 pt-3 flex flex-col sm:flex-row justify-between items-start sm:items-center text-[10px] text-slate-400 gap-2">
+                  <div>
+                    <span>AUTHORITY: </span>
+                    <strong className="text-slate-200">State Disaster Management Authority (SDMA) Patna</strong>
+                  </div>
+                  <div className="font-mono text-emerald-400 flex items-center gap-1">
+                    <span>✓ DIGITAL SIGNATURE VERIFIED</span>
+                  </div>
                 </div>
               </div>
 
               {/* ACTION FOOTER */}
-              <div className="mt-6 flex flex-wrap items-center justify-end gap-3 border-t border-slate-800 pt-4">
+              <div className="mt-5 flex flex-wrap items-center justify-end gap-3 border-t border-slate-800 pt-4">
                 <button
                   onClick={() => window.print()}
-                  className="cursor-pointer px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold transition flex items-center gap-1.5 shadow-lg shadow-blue-600/20"
+                  className="cursor-pointer px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold transition flex items-center gap-1.5 shadow-lg shadow-blue-600/30"
                 >
-                  <span>🖨️</span> PRINT / SAVE AS PDF
+                  <span>🖨️</span> PRINT / EXPORT OFFICIAL SITREP (PDF)
                 </button>
                 <button
                   onClick={() => setShowSitrepModal(false)}

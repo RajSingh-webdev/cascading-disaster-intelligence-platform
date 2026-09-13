@@ -7,6 +7,7 @@ from experimental_ml import predict_experimental
 from disaster_pipeline import run_disaster_pipeline
 from grid_engine import generate_spatial_grid
 from historical_engine import get_historical_2024_summary
+from live_sensor import fetch_live_telemetry
 
 
 class DisasterInput(BaseModel):
@@ -43,9 +44,18 @@ def home():
             "GET /api/disaster/spatial-grid",
             "GET /api/historical/bihar-2024",
             "GET /api/satellite/metadata",
+            "GET /api/sensor/live",
             "POST /api/ml/experimental",
         ],
     }
+
+
+@app.get("/api/sensor/live")
+def get_live_sensor_data():
+    """
+    Fetches real-time meteorological observations and derived barrage flood parameters.
+    """
+    return fetch_live_telemetry()
 
 
 @app.get("/api/satellite/metadata")
@@ -91,10 +101,16 @@ def get_spatial_grid(
     rainfall_mm: float = Query(default=180.0, ge=0),
     water_level_m: float = Query(default=8.0, ge=0),
     grid_size: int = Query(default=8, ge=4, le=20),
+    mode: str = Query(default="simulation"),
 ):
     """
     Generates a 2D spatial raster grid with multi-modal physical attributes.
     """
+    if mode == "live":
+        telemetry = fetch_live_telemetry()
+        rainfall_mm = telemetry["rainfall_mm"]
+        water_level_m = telemetry["water_level_m"]
+
     return generate_spatial_grid(
         rainfall_mm=rainfall_mm,
         water_level_m=water_level_m,
@@ -131,12 +147,15 @@ def analyze_disaster(data: DisasterInput):
             water_level_m=data.water_level_m,
         )
 
-    # LIVE MODE
-    return run_disaster_pipeline(
-        rainfall_mm=180,
-        duration_hours=4,
-        water_level_m=8,
+    # LIVE MODE — REAL METEOROLOGICAL TELEMETRY
+    telemetry = fetch_live_telemetry()
+    result = run_disaster_pipeline(
+        rainfall_mm=telemetry["rainfall_mm"],
+        duration_hours=telemetry["duration_hours"],
+        water_level_m=telemetry["water_level_m"],
     )
+    result["live_telemetry"] = telemetry
+    return result
 
 
 @app.post("/api/ml/experimental")

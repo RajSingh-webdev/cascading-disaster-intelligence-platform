@@ -1,2 +1,2 @@
-# AI/decision layer currently uses Python standard-library modules only.
-# Backend/frontend dependencies should be managed by the backend project.
+# HTTP client used by the live Open-Meteo telemetry integration.
+requests>=2.31.0

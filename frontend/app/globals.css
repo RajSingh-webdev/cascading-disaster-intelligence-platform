@@ -101,3 +101,33 @@ body {
   animation: radar-ping 2s cubic-bezier(0, 0, 0.2, 1) infinite;
 }
 
+/* TOUCH & MULTI-FINGER GESTURE SUPPORT */
+.leaflet-container {
+  touch-action: pan-x pan-y pinch-zoom;
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.leaflet-touch .leaflet-bar {
+  border: 1px solid rgba(59, 130, 246, 0.4) !important;
+  background: rgba(10, 20, 38, 0.9) !important;
+  backdrop-filter: blur(8px);
+  border-radius: 8px !important;
+  overflow: hidden;
+}
+
+.leaflet-touch .leaflet-bar a {
+  background: rgba(10, 20, 38, 0.9) !important;
+  color: #93c5fd !important;
+  border-bottom: 1px solid rgba(59, 130, 246, 0.2) !important;
+  width: 32px !important;
+  height: 32px !important;
+  line-height: 32px !important;
+}
+
+.leaflet-touch .leaflet-bar a:hover {
+  background: rgba(30, 58, 138, 0.9) !important;
+  color: #ffffff !important;
+}
+
