@@ -1,2 +1,8 @@
-# HTTP client used by the live Open-Meteo telemetry integration.
+fastapi>=0.110.0
+uvicorn[standard]>=0.28.0
+pydantic>=2.0.0
 requests>=2.31.0
+pandas>=2.0.0
+joblib>=1.3.0
+scikit-learn>=1.4.0
+ortools>=9.8.0

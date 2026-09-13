@@ -1,0 +1,21 @@
+services:
+  # Backend Service (Python FastAPI)
+  - type: web
+    name: disaster-intelligence-backend
+    runtime: python
+    rootDir: backend
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.8
+
+  # Frontend Service (Next.js)
+  - type: web
+    name: disaster-intelligence-frontend
+    runtime: node
+    rootDir: frontend
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: npm start

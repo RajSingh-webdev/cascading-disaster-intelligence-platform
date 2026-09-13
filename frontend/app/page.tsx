@@ -132,6 +132,8 @@ type ExperimentalMLResult = {
   note: string;
 };
 
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
+
 export default function Home() {
   const [mode, setMode] = useState<Mode>("historical");
 
@@ -259,7 +261,7 @@ export default function Home() {
             water_level_m: wl,
           };
 
-      const response = await fetch("http://127.0.0.1:8000/api/disaster/analyze", {
+      const response = await fetch(`${API_BASE_URL}/api/disaster/analyze`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
@@ -289,7 +291,7 @@ export default function Home() {
       }
     } catch (error) {
       console.error(error);
-      alert("Could not connect to the disaster engine on http://127.0.0.1:8000. Ensure the backend is running.");
+      alert(`Could not connect to the disaster engine on ${API_BASE_URL}. Ensure the backend is running.`);
     } finally {
       setLoading(false);
     }
@@ -321,7 +323,7 @@ export default function Home() {
       const longitude = 85.95;
 
       const response = await fetch(
-        `http://127.0.0.1:8000/api/ml/experimental?latitude=${latitude}&longitude=${longitude}`,
+        `${API_BASE_URL}/api/ml/experimental?latitude=${latitude}&longitude=${longitude}`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
